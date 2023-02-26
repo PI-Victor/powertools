@@ -3,11 +3,9 @@ name = "leaf"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 tokio = { version = "1.25", features = ["rt-multi-thread", "macros", "time", "signal"] }
 pnet = "0.33"
 structopt = "0.3"
 tracing = "0.1"
-tracing-subscriber = "0.3.16"
+tracing-subscriber = "0.3"

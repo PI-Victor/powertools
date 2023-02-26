@@ -28,20 +28,17 @@ pub async fn run(opts: SniffOpts, protocol: TLProtocol) -> Result<()> {
     // Loop over incoming packets
     loop {
         tokio::select! {
-                    _ = sigint.recv() => {
-                        break;
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-        match rx.next() {
+            _ = sigint.recv() => {
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                match rx.next() {
                     Ok(packet) => {
-                        // Parse the Ethernet packet
-
-                        let ethernet = match EthernetPacket::new(packet) {
-                            Some(ethernet) => ethernet,
-                            None => {
-                                error!("failed to parse ethernet packet");
-                                continue;
-                            }
+                        let ethernet = if let Some(eth) =  EthernetPacket::new(packet) {
+                            eth
+                        } else {
+                            error!("failed to parse ethernet packet, skipping...");
+                            continue;
                         };
 
                         // Parse the IPv4 packet
@@ -82,8 +79,8 @@ pub async fn run(opts: SniffOpts, protocol: TLProtocol) -> Result<()> {
                     }
                     Err(e) => info!("error receiving packet: {}", e),
                 }
-                    }
-                }
+            }
+        }
     }
     Ok(())
 }
