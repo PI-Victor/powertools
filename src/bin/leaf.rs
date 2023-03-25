@@ -1,19 +1,13 @@
-use leaf::server::run;
-use leaf::SubCommands;
-use leaf::{Result, TLProtocol};
+use leaf::listener;
+use leaf::listener::run;
+use leaf::{Result, SubCommands};
 use std::str::FromStr;
 use structopt::StructOpt;
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
 struct Opts {
     #[structopt(short, long, default_value = "info", env = "LEAF_LOG_LEVEL")]
     log_level: String,
-    #[structopt(long,  possible_values = &TLProtocol::variants(), case_insensitive = true, default_value = "ALL")]
-    pub protocol: TLProtocol,
-    #[structopt(long, default_value = "1000", env = "LEAF_INTERVAL")]
-    interval: u64,
-    #[structopt(long, default_value = "0", env = "LEAF_DURATION")]
-    duration: u64,
     #[structopt(subcommand)]
     subcommand: SubCommands,
 }
@@ -28,7 +22,8 @@ async fn main() -> Result<()> {
         .init();
 
     match opts.subcommand {
-        SubCommands::Sniff(sniff_opts) => run(sniff_opts, opts.protocol).await?,
+        SubCommands::Sniff(sniff_opts) => run(sniff_opts).await?,
+        SubCommands::Interfaces(_) => listener::list_interfaces(),
     }
 
     Ok(())

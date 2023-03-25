@@ -1,16 +1,17 @@
-pub mod server;
+pub mod listener;
 
 use std::str::FromStr;
 use structopt::StructOpt;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
 pub enum SubCommands {
     Sniff(SniffOpts),
+    Interfaces(InterfacesOpt),
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
 pub struct SniffOpts {
     #[structopt(short = "if", long)]
     pub interface: String,
@@ -20,7 +21,13 @@ pub struct SniffOpts {
     pub port: Option<u16>,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
+pub struct InterfacesOpt {
+    #[structopt(short, long)]
+    pub list: bool,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 pub enum TLProtocol {
     ALL,
     TCP,
