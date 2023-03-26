@@ -16,9 +16,14 @@ pub struct SniffOpts {
     #[structopt(short = "if", long)]
     pub interface: String,
     #[structopt(long)]
-    pub ip: Option<String>,
+    pub source_ip: Option<String>,
+    #[structopt(short, long, possible_values = TLProtocol::variants(), case_insensitive = true, default_value = "ALL")]
+    pub protocol: TLProtocol,
     #[structopt(short, long)]
-    pub port: Option<u16>,
+    pub source_port: Option<u16>,
+    pub destination_ip: Option<String>,
+    #[structopt(short, long)]
+    pub destination_port: Option<u16>,
 }
 
 #[derive(Debug, StructOpt, Clone)]

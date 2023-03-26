@@ -1,12 +1,13 @@
-use crate::{Result, SniffOpts};
+use crate::{Result, SniffOpts, TLProtocol};
 use pnet::datalink::{self, DataLinkReceiver, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpFlags;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::Packet;
+use std::fmt::{Display, Formatter};
 use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, error, info};
@@ -25,6 +26,8 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     // Loop over incoming frames
     let r = Arc::new(Mutex::new(rx));
+    let mut no = 0;
+
     loop {
         let rx_clone = r.clone();
         tokio::select! {
@@ -32,160 +35,176 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(0)) => {
-                handle_receiver(rx_clone);
+                if let Some(packet_info) = handle_receiver(rx_clone){
+                   no += 1;
+                   if matches_filter(packet_info.clone(), &opts) {
+                       println!("{}: {}", no, &packet_info);
+                   }
+                }
             }
         }
     }
     Ok(())
 }
 
-fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) {
+#[derive(Clone, Debug)]
+struct PacketInfo {
+    source_ip: String,
+    destination_ip: String,
+    source_port: u16,
+    destination_port: u16,
+    protocol: IpNextHeaderProtocol,
+    flags: String,
+    ipv6: bool,
+}
+
+impl Display for PacketInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.ipv6 {
+            write!(
+                f,
+                "{} [{}]:{} -> [{}]:{}, {}",
+                self.protocol.to_string().to_uppercase(),
+                self.source_ip,
+                self.source_port,
+                self.destination_ip,
+                self.destination_port,
+                self.flags
+            )
+        } else {
+            write!(
+                f,
+                "{} {}:{} -> {}:{} {}",
+                self.protocol.to_string().to_uppercase(),
+                self.source_ip,
+                self.source_port,
+                self.destination_ip,
+                self.destination_port,
+                self.flags,
+            )
+        }
+    }
+}
+
+fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketInfo> {
     let mut rx = rx.lock().unwrap();
 
     match rx.next() {
         Ok(packet) => {
-            let mut destination_port = 0;
-            let mut source_port = 0;
-            let mut flags = String::from("");
-
             if let Some(eth) = EthernetPacket::new(packet) {
                 match eth.get_ethertype() {
                     EtherTypes::Ipv4 => {
-                        let ipv4_packet = Ipv4Packet::new(eth.payload()).unwrap();
-
-                        if let Some(tcp_packet) = TcpPacket::new(ipv4_packet.payload()) {
-                            destination_port = tcp_packet.get_destination();
-                            source_port = tcp_packet.get_source();
-                            flags = get_flags(tcp_packet.get_flags());
-                        };
-
-                        let packet_protocol = match ipv4_packet.get_next_level_protocol() {
-                            IpNextHeaderProtocols::Tcp => IpNextHeaderProtocols::Tcp.to_string(),
-                            IpNextHeaderProtocols::Udp => IpNextHeaderProtocols::Udp.to_string(),
-                            unsupported => {
-                                debug!("unsupported protocol for ipv4 {:?}", unsupported);
-                                unsupported.to_string()
-                            }
-                        };
+                        let ipv4_packet = Ipv4Packet::new(eth.payload())?;
+                        let tcp_packet = TcpPacket::new(ipv4_packet.payload())?;
 
                         debug!("ethernet frame wrapped ipv4 packet: {:?}", ipv4_packet);
 
-                        println!(
-                            "{} {}:{} -> {}:{} {} - size: {}",
-                            packet_protocol,
-                            ipv4_packet.get_source().to_string(),
-                            source_port,
-                            ipv4_packet.get_destination().to_string(),
-                            destination_port,
-                            flags,
-                            ipv4_packet.packet().len(),
-                        );
-                        return;
+                        return Some(PacketInfo {
+                            source_ip: ipv4_packet.get_source().to_string(),
+                            destination_ip: ipv4_packet.get_destination().to_string(),
+                            source_port: tcp_packet.get_source(),
+                            destination_port: tcp_packet.get_destination(),
+                            protocol: ipv4_packet.get_next_level_protocol(),
+                            flags: get_flags(tcp_packet.get_flags()),
+                            ipv6: false,
+                        });
                     }
                     EtherTypes::Ipv6 => {
-                        let ipv6_packet = Ipv6Packet::new(eth.payload()).unwrap();
-                        if let Some(tcp_packet) = TcpPacket::new(ipv6_packet.payload()) {
-                            destination_port = tcp_packet.get_destination();
-                            source_port = tcp_packet.get_source();
-                            flags = get_flags(tcp_packet.get_flags());
-                        };
-
-                        let packet_protocol = match ipv6_packet.get_next_header() {
-                            IpNextHeaderProtocols::Tcp => IpNextHeaderProtocols::Tcp.to_string(),
-                            IpNextHeaderProtocols::Udp => IpNextHeaderProtocols::Udp.to_string(),
-                            unsupported => {
-                                debug!("unsupported protocol for ipv6 {:?}", unsupported);
-                                unsupported.to_string()
-                            }
-                        };
+                        let ipv6_packet = Ipv6Packet::new(eth.payload())?;
+                        let tcp_packet = TcpPacket::new(ipv6_packet.payload())?;
 
                         debug!("ethernet frame wrapped ipv6 packet: {:?}", ipv6_packet);
 
-                        println!(
-                            "{} [{}]:{} -> [{}]:{} {} - size: {}",
-                            packet_protocol,
-                            ipv6_packet.get_source().to_string(),
-                            source_port,
-                            ipv6_packet.get_destination().to_string(),
-                            destination_port,
-                            flags,
-                            ipv6_packet.packet().len()
-                        );
-                        return;
+                        return Some(PacketInfo {
+                            source_ip: ipv6_packet.get_source().to_string(),
+                            destination_ip: ipv6_packet.get_destination().to_string(),
+                            source_port: tcp_packet.get_source(),
+                            destination_port: tcp_packet.get_destination(),
+                            protocol: ipv6_packet.get_next_header(),
+                            flags: get_flags(tcp_packet.get_flags()),
+                            ipv6: true,
+                        });
                     }
                     // TODO: maybe handle other protocols?
-                    _ => return,
+                    _ => return None,
                 }
             } else {
                 error!("failed to parse ethernet packet, skipping...");
             };
 
             if let Some(ipv4_packet) = Ipv4Packet::new(packet) {
-                if let Some(tcp_packet) = TcpPacket::new(ipv4_packet.payload()) {
-                    destination_port = tcp_packet.get_destination();
-                    source_port = tcp_packet.get_source();
-                    flags = get_flags(tcp_packet.get_flags());
-                };
-
-                let packet_protocol = match ipv4_packet.get_next_level_protocol() {
-                    IpNextHeaderProtocols::Tcp => IpNextHeaderProtocols::Tcp.to_string(),
-                    IpNextHeaderProtocols::Udp => IpNextHeaderProtocols::Udp.to_string(),
-                    unsupported => {
-                        debug!("unsupported protocol for ipv4 {:?}", unsupported);
-                        unsupported.to_string()
-                    }
-                };
+                let tcp_packet = TcpPacket::new(ipv4_packet.payload())?;
 
                 debug!("found unwrapped ipv4 tcp packet: {:?}", ipv4_packet);
 
-                println!(
-                    "{} {}:{} -> {}:{} {} - size: {}",
-                    packet_protocol,
-                    ipv4_packet.get_source().to_string(),
-                    source_port,
-                    ipv4_packet.get_destination().to_string(),
-                    destination_port,
-                    flags,
-                    ipv4_packet.packet().len()
-                );
+                return Some(PacketInfo {
+                    source_ip: ipv4_packet.get_source().to_string(),
+                    destination_ip: ipv4_packet.get_destination().to_string(),
+                    source_port: tcp_packet.get_source(),
+                    destination_port: tcp_packet.get_destination(),
+                    protocol: ipv4_packet.get_next_level_protocol(),
+                    flags: get_flags(tcp_packet.get_flags()),
+                    ipv6: false,
+                });
             } else {
-                if let Some(ipv6_packet) = Ipv6Packet::new(packet) {
-                    if let Some(tcp_packet) = TcpPacket::new(ipv6_packet.payload()) {
-                        destination_port = tcp_packet.get_destination();
-                        source_port = tcp_packet.get_source();
-                        flags = get_flags(tcp_packet.get_flags());
-                    };
+                let ipv6_packet = Ipv6Packet::new(packet)?;
+                let tcp_packet = TcpPacket::new(ipv6_packet.payload())?;
 
-                    let packet_protocol = match ipv6_packet.get_next_header() {
-                        IpNextHeaderProtocols::Tcp => IpNextHeaderProtocols::Tcp.to_string(),
-                        IpNextHeaderProtocols::Udp => IpNextHeaderProtocols::Udp.to_string(),
-                        unsupported => {
-                            debug!("unsupported protocol for ipv6: {:?}", unsupported);
-                            unsupported.to_string()
-                        }
-                    };
-
-                    debug!("found unwrapped ipv6 tcp packet: {:?}", ipv6_packet);
-
-                    println!(
-                        "{} [{}]:{} -> [{}]:{} {} - size: {}",
-                        packet_protocol,
-                        ipv6_packet.get_source().to_string(),
-                        source_port,
-                        ipv6_packet.get_destination().to_string(),
-                        destination_port,
-                        flags,
-                        ipv6_packet.packet().len()
-                    );
-                };
-            }
+                debug!("found unwrapped ipv6 tcp packet: {:?}", ipv6_packet);
+                return Some(PacketInfo {
+                    source_ip: ipv6_packet.get_source().to_string(),
+                    destination_ip: ipv6_packet.get_destination().to_string(),
+                    source_port: tcp_packet.get_source(),
+                    destination_port: tcp_packet.get_destination(),
+                    protocol: ipv6_packet.get_next_header(),
+                    flags: get_flags(tcp_packet.get_flags()),
+                    ipv6: true,
+                });
+            };
         }
         Err(e) => {
             if e.kind() != std::io::ErrorKind::Interrupted {
                 error!("error reading: {}", e);
             }
+            return None;
         }
     }
+}
+
+fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
+    if opts.source_ip.is_some() && opts.source_ip.as_ref().unwrap() != &packet_info.source_ip {
+        return false;
+    }
+    if opts.destination_ip.is_some()
+        && opts.destination_ip.as_ref().unwrap() != &packet_info.destination_ip
+    {
+        return false;
+    }
+    if opts.source_port.is_some() && opts.source_port.unwrap() != packet_info.source_port {
+        return false;
+    }
+    if opts.destination_port.is_some()
+        && opts.destination_port.unwrap() != packet_info.destination_port
+    {
+        return false;
+    }
+
+    match opts.protocol {
+        TLProtocol::ALL => {
+            return true;
+        }
+        TLProtocol::TCP => {
+            if packet_info.protocol != IpNextHeaderProtocols::Tcp {
+                return false;
+            }
+        }
+        TLProtocol::UDP => {
+            if packet_info.protocol != IpNextHeaderProtocols::Udp {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 // perform bitwise operations to determine the flags
@@ -223,4 +242,37 @@ pub fn list_interfaces() {
     datalink::interfaces().into_iter().for_each(|i| {
         println!("{}", i);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_flags() {
+        assert_eq!(get_flags(0b0000000000000000), "");
+        assert_eq!(get_flags(0b0000000000000001), "FIN ");
+        assert_eq!(get_flags(0b0000000000000010), "SYN ");
+        assert_eq!(get_flags(0b0000000000000011), "SYN FIN ");
+        assert_eq!(get_flags(0b0000000000000100), "RST ");
+        assert_eq!(get_flags(0b0000000000000101), "RST FIN ");
+        assert_eq!(get_flags(0b0000000000000110), "RST SYN ");
+        assert_eq!(get_flags(0b0000000000000111), "RST SYN FIN ");
+        assert_eq!(get_flags(0b0000000000001000), "PSH ");
+        assert_eq!(get_flags(0b0000000000001001), "PSH FIN ");
+        assert_eq!(get_flags(0b0000000000001010), "PSH SYN ");
+        assert_eq!(get_flags(0b0000000000001011), "PSH SYN FIN ");
+        assert_eq!(get_flags(0b0000000000001100), "PSH RST ");
+        assert_eq!(get_flags(0b0000000000001101), "PSH RST FIN ");
+        assert_eq!(get_flags(0b0000000000001110), "PSH RST SYN ");
+        assert_eq!(get_flags(0b0000000000001111), "PSH RST SYN FIN ");
+        assert_eq!(get_flags(0b0000000000010000), "ACK ");
+        assert_eq!(get_flags(0b0000000000010001), "ACK FIN ");
+        assert_eq!(get_flags(0b0000000000010010), "ACK SYN ");
+        assert_eq!(get_flags(0b0000000000010011), "ACK SYN FIN ");
+        assert_eq!(get_flags(0b0000000000010100), "ACK RST ");
+        assert_eq!(get_flags(0b0000000000010101), "ACK RST FIN ");
+        assert_eq!(get_flags(0b0000000000010110), "ACK RST SYN ");
+        assert_eq!(get_flags(0b0000000000010111), "ACK RST SYN FIN ");
+    }
 }
