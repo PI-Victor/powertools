@@ -15,15 +15,19 @@ pub enum SubCommands {
 pub struct SniffOpts {
     #[structopt(short = "if", long)]
     pub interface: String,
-    #[structopt(long)]
-    pub source_ip: Option<String>,
     #[structopt(short, long, possible_values = TLProtocol::variants(), case_insensitive = true, default_value = "ALL")]
     pub protocol: TLProtocol,
-    #[structopt(short, long)]
+    #[structopt(long)]
+    pub source: Option<String>,
+    #[structopt(long)]
     pub source_port: Option<u16>,
-    pub destination_ip: Option<String>,
+    #[structopt(long)]
+    pub destination: Option<String>,
     #[structopt(short, long)]
     pub destination_port: Option<u16>,
+    /// Will try to resolve IP addresses to hostnames
+    #[structopt(short, long)]
+    pub resolve: bool,
 }
 
 #[derive(Debug, StructOpt, Clone)]

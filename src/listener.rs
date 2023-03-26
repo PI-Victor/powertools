@@ -8,6 +8,7 @@ use pnet::packet::tcp::TcpFlags;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::Packet;
 use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, error, info};
@@ -16,6 +17,7 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
     let interface = get_interface(&opts.interface)?;
 
     info!("Listening on interface: {}", interface.name);
+    info!("NO | Source | Destination | Protocol | Flags | Length | Sequence | Window");
 
     // Open a raw socket on the interface
     let (_, rx) = match datalink::channel(&interface, Default::default()) {
@@ -35,11 +37,15 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(0)) => {
-                if let Some(packet_info) = handle_receiver(rx_clone){
-                   no += 1;
+                if let Some(mut packet_info) = handle_receiver(rx_clone){
                    if matches_filter(packet_info.clone(), &opts) {
+                    if opts.resolve {
+                       packet_info.source_ip = resolve_dns(&packet_info.source_ip);
+                       packet_info.destination_ip = resolve_dns(&packet_info.destination_ip);
+                    }
                        println!("{}: {}", no, &packet_info);
                    }
+                   no += 1;
                 }
             }
         }
@@ -56,6 +62,9 @@ struct PacketInfo {
     protocol: IpNextHeaderProtocol,
     flags: String,
     ipv6: bool,
+    length: usize,
+    sequence: u32,
+    window: u16,
 }
 
 impl Display for PacketInfo {
@@ -63,24 +72,30 @@ impl Display for PacketInfo {
         if self.ipv6 {
             write!(
                 f,
-                "{} [{}]:{} -> [{}]:{}, {}",
-                self.protocol.to_string().to_uppercase(),
-                self.source_ip,
-                self.source_port,
-                self.destination_ip,
-                self.destination_port,
-                self.flags
-            )
-        } else {
-            write!(
-                f,
-                "{} {}:{} -> {}:{} {}",
+                "{} [{}]:{} -> [{}]:{}, {} {} [{}  {}] ",
                 self.protocol.to_string().to_uppercase(),
                 self.source_ip,
                 self.source_port,
                 self.destination_ip,
                 self.destination_port,
                 self.flags,
+                self.length,
+                self.sequence,
+                self.window,
+            )
+        } else {
+            write!(
+                f,
+                "{} {}:{} -> {}:{} {} {} [{} {}]",
+                self.protocol.to_string().to_uppercase(),
+                self.source_ip,
+                self.source_port,
+                self.destination_ip,
+                self.destination_port,
+                self.flags,
+                self.length,
+                self.sequence,
+                self.window,
             )
         }
     }
@@ -107,6 +122,9 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                             protocol: ipv4_packet.get_next_level_protocol(),
                             flags: get_flags(tcp_packet.get_flags()),
                             ipv6: false,
+                            length: tcp_packet.packet().len(),
+                            sequence: u32::from_be(tcp_packet.get_sequence()),
+                            window: u16::from_be(tcp_packet.get_window()),
                         });
                     }
                     EtherTypes::Ipv6 => {
@@ -123,6 +141,9 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                             protocol: ipv6_packet.get_next_header(),
                             flags: get_flags(tcp_packet.get_flags()),
                             ipv6: true,
+                            length: tcp_packet.packet().len(),
+                            sequence: u32::from_be(tcp_packet.get_sequence()),
+                            window: u16::from_be(tcp_packet.get_window()),
                         });
                     }
                     // TODO: maybe handle other protocols?
@@ -145,6 +166,9 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                     protocol: ipv4_packet.get_next_level_protocol(),
                     flags: get_flags(tcp_packet.get_flags()),
                     ipv6: false,
+                    length: tcp_packet.packet().len(),
+                    sequence: u32::from_be(tcp_packet.get_sequence()),
+                    window: u16::from_be(tcp_packet.get_window()),
                 });
             } else {
                 let ipv6_packet = Ipv6Packet::new(packet)?;
@@ -159,6 +183,9 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                     protocol: ipv6_packet.get_next_header(),
                     flags: get_flags(tcp_packet.get_flags()),
                     ipv6: true,
+                    length: tcp_packet.packet().len(),
+                    sequence: u32::from_be(tcp_packet.get_sequence()),
+                    window: u16::from_be(tcp_packet.get_window()),
                 });
             };
         }
@@ -172,11 +199,11 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 }
 
 fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
-    if opts.source_ip.is_some() && opts.source_ip.as_ref().unwrap() != &packet_info.source_ip {
+    if opts.source.is_some() && opts.source.as_ref().unwrap() != &packet_info.source_ip {
         return false;
     }
-    if opts.destination_ip.is_some()
-        && opts.destination_ip.as_ref().unwrap() != &packet_info.destination_ip
+    if opts.destination.is_some()
+        && opts.destination.as_ref().unwrap() != &packet_info.destination_ip
     {
         return false;
     }
@@ -205,6 +232,15 @@ fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
         }
     }
     true
+}
+
+fn resolve_dns(ip: &str) -> String {
+    if let Ok(ip) = ip.parse::<IpAddr>() {
+        if let Ok(hostname) = dns_lookup::lookup_addr(&ip) {
+            return hostname;
+        }
+    }
+    ip.to_string()
 }
 
 // perform bitwise operations to determine the flags
@@ -275,4 +311,7 @@ mod tests {
         assert_eq!(get_flags(0b0000000000010110), "ACK RST SYN ");
         assert_eq!(get_flags(0b0000000000010111), "ACK RST SYN FIN ");
     }
+
+    #[test]
+    fn test_matches_filter() {}
 }
