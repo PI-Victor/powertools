@@ -11,16 +11,23 @@ use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 pub async fn run(opts: SniffOpts) -> Result<()> {
     let interface = get_interface(&opts.interface)?;
 
-    info!("Listening on interface: {}", interface.name);
-    info!("NO | Source | Destination | Protocol | Flags | Length | Sequence | Window");
+    println!("Listening on interface: {}\n", interface.name);
+    println!("NO | Source | Destination | Protocol | Flags | Length | Sequence | Window\n");
+    println!("--------------------------------------------------------------------------------\n");
 
     // Open a raw socket on the interface
-    let (_, rx) = match datalink::channel(&interface, Default::default()) {
+    let (_, rx) = match datalink::channel(
+        &interface,
+        datalink::Config {
+            promiscuous: opts.promiscuous,
+            ..Default::default()
+        },
+    ) {
         Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("unknown channel type"),
         Err(e) => panic!("error creating channel: {}", e),
@@ -38,11 +45,14 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(0)) => {
                 if let Some(mut packet_info) = handle_receiver(rx_clone){
-                   if matches_filter(packet_info.clone(), &opts) {
+                    // TODO: Find a better solution, if the packet is filtered
+                    // out, it should not be resolved, this adds dns overhead
                     if opts.resolve {
-                       packet_info.source_ip = resolve_dns(&packet_info.source_ip);
-                       packet_info.destination_ip = resolve_dns(&packet_info.destination_ip);
+                       packet_info.source = resolve_dns(&packet_info.source);
+                       packet_info.destination = resolve_dns(&packet_info.destination);
                     }
+
+                   if matches_filter(packet_info.clone(), &opts) {
                        println!("{}: {}", no, &packet_info);
                    }
                    no += 1;
@@ -55,9 +65,9 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
 
 #[derive(Clone, Debug)]
 struct PacketInfo {
-    source_ip: String,
-    destination_ip: String,
+    source: String,
     source_port: u16,
+    destination: String,
     destination_port: u16,
     protocol: IpNextHeaderProtocol,
     flags: String,
@@ -74,9 +84,9 @@ impl Display for PacketInfo {
                 f,
                 "{} [{}]:{} -> [{}]:{}, {} {} [{}  {}] ",
                 self.protocol.to_string().to_uppercase(),
-                self.source_ip,
+                self.source,
                 self.source_port,
-                self.destination_ip,
+                self.destination,
                 self.destination_port,
                 self.flags,
                 self.length,
@@ -88,9 +98,9 @@ impl Display for PacketInfo {
                 f,
                 "{} {}:{} -> {}:{} {} {} [{} {}]",
                 self.protocol.to_string().to_uppercase(),
-                self.source_ip,
+                self.source,
                 self.source_port,
-                self.destination_ip,
+                self.destination,
                 self.destination_port,
                 self.flags,
                 self.length,
@@ -115,8 +125,8 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                         debug!("ethernet frame wrapped ipv4 packet: {:?}", ipv4_packet);
 
                         return Some(PacketInfo {
-                            source_ip: ipv4_packet.get_source().to_string(),
-                            destination_ip: ipv4_packet.get_destination().to_string(),
+                            source: ipv4_packet.get_source().to_string(),
+                            destination: ipv4_packet.get_destination().to_string(),
                             source_port: tcp_packet.get_source(),
                             destination_port: tcp_packet.get_destination(),
                             protocol: ipv4_packet.get_next_level_protocol(),
@@ -134,8 +144,8 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                         debug!("ethernet frame wrapped ipv6 packet: {:?}", ipv6_packet);
 
                         return Some(PacketInfo {
-                            source_ip: ipv6_packet.get_source().to_string(),
-                            destination_ip: ipv6_packet.get_destination().to_string(),
+                            source: ipv6_packet.get_source().to_string(),
+                            destination: ipv6_packet.get_destination().to_string(),
                             source_port: tcp_packet.get_source(),
                             destination_port: tcp_packet.get_destination(),
                             protocol: ipv6_packet.get_next_header(),
@@ -159,8 +169,8 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                 debug!("found unwrapped ipv4 tcp packet: {:?}", ipv4_packet);
 
                 return Some(PacketInfo {
-                    source_ip: ipv4_packet.get_source().to_string(),
-                    destination_ip: ipv4_packet.get_destination().to_string(),
+                    source: ipv4_packet.get_source().to_string(),
+                    destination: ipv4_packet.get_destination().to_string(),
                     source_port: tcp_packet.get_source(),
                     destination_port: tcp_packet.get_destination(),
                     protocol: ipv4_packet.get_next_level_protocol(),
@@ -176,8 +186,8 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 
                 debug!("found unwrapped ipv6 tcp packet: {:?}", ipv6_packet);
                 return Some(PacketInfo {
-                    source_ip: ipv6_packet.get_source().to_string(),
-                    destination_ip: ipv6_packet.get_destination().to_string(),
+                    source: ipv6_packet.get_source().to_string(),
+                    destination: ipv6_packet.get_destination().to_string(),
                     source_port: tcp_packet.get_source(),
                     destination_port: tcp_packet.get_destination(),
                     protocol: ipv6_packet.get_next_header(),
@@ -199,11 +209,10 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 }
 
 fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
-    if opts.source.is_some() && opts.source.as_ref().unwrap() != &packet_info.source_ip {
+    if opts.source.is_some() && opts.source.as_ref().unwrap() != &packet_info.source {
         return false;
     }
-    if opts.destination.is_some()
-        && opts.destination.as_ref().unwrap() != &packet_info.destination_ip
+    if opts.destination.is_some() && opts.destination.as_ref().unwrap() != &packet_info.destination
     {
         return false;
     }
@@ -246,14 +255,11 @@ fn resolve_dns(ip: &str) -> String {
 // perform bitwise operations to determine the flags
 fn get_flags(tcp_flags: u16) -> String {
     let mut flags = String::new();
-    if tcp_flags & TcpFlags::SYN > 0 {
-        flags.push_str("SYN ");
-    }
-    if tcp_flags & TcpFlags::ACK > 0 {
-        flags.push_str("ACK ");
-    }
     if tcp_flags & TcpFlags::FIN > 0 {
         flags.push_str("FIN ");
+    }
+    if tcp_flags & TcpFlags::SYN > 0 {
+        flags.push_str("SYN ");
     }
     if tcp_flags & TcpFlags::RST > 0 {
         flags.push_str("RST ");
@@ -261,8 +267,17 @@ fn get_flags(tcp_flags: u16) -> String {
     if tcp_flags & TcpFlags::PSH > 0 {
         flags.push_str("PSH ");
     }
+    if tcp_flags & TcpFlags::ACK > 0 {
+        flags.push_str("ACK ");
+    }
     if tcp_flags & TcpFlags::URG > 0 {
         flags.push_str("URG ");
+    }
+    if tcp_flags & TcpFlags::ECE > 0 {
+        flags.push_str("ECE ");
+    }
+    if tcp_flags & TcpFlags::CWR > 0 {
+        flags.push_str("CWR ");
     }
     flags
 }
@@ -289,29 +304,26 @@ mod tests {
         assert_eq!(get_flags(0b0000000000000000), "");
         assert_eq!(get_flags(0b0000000000000001), "FIN ");
         assert_eq!(get_flags(0b0000000000000010), "SYN ");
-        assert_eq!(get_flags(0b0000000000000011), "SYN FIN ");
+        assert_eq!(get_flags(0b0000000000000011), "FIN SYN ");
         assert_eq!(get_flags(0b0000000000000100), "RST ");
-        assert_eq!(get_flags(0b0000000000000101), "RST FIN ");
-        assert_eq!(get_flags(0b0000000000000110), "RST SYN ");
-        assert_eq!(get_flags(0b0000000000000111), "RST SYN FIN ");
+        assert_eq!(get_flags(0b0000000000000101), "FIN RST ");
+        assert_eq!(get_flags(0b0000000000000110), "SYN RST ");
+        assert_eq!(get_flags(0b0000000000000111), "FIN SYN RST ");
         assert_eq!(get_flags(0b0000000000001000), "PSH ");
-        assert_eq!(get_flags(0b0000000000001001), "PSH FIN ");
-        assert_eq!(get_flags(0b0000000000001010), "PSH SYN ");
-        assert_eq!(get_flags(0b0000000000001011), "PSH SYN FIN ");
-        assert_eq!(get_flags(0b0000000000001100), "PSH RST ");
-        assert_eq!(get_flags(0b0000000000001101), "PSH RST FIN ");
-        assert_eq!(get_flags(0b0000000000001110), "PSH RST SYN ");
-        assert_eq!(get_flags(0b0000000000001111), "PSH RST SYN FIN ");
+        assert_eq!(get_flags(0b0000000000001001), "FIN PSH ");
+        assert_eq!(get_flags(0b0000000000001010), "SYN PSH ");
+        assert_eq!(get_flags(0b0000000000001011), "FIN SYN PSH ");
+        assert_eq!(get_flags(0b0000000000001100), "RST PSH ");
+        assert_eq!(get_flags(0b0000000000001101), "FIN RST PSH ");
+        assert_eq!(get_flags(0b0000000000001110), "SYN RST PSH ");
+        assert_eq!(get_flags(0b0000000000001111), "FIN SYN RST PSH ");
         assert_eq!(get_flags(0b0000000000010000), "ACK ");
-        assert_eq!(get_flags(0b0000000000010001), "ACK FIN ");
-        assert_eq!(get_flags(0b0000000000010010), "ACK SYN ");
-        assert_eq!(get_flags(0b0000000000010011), "ACK SYN FIN ");
-        assert_eq!(get_flags(0b0000000000010100), "ACK RST ");
-        assert_eq!(get_flags(0b0000000000010101), "ACK RST FIN ");
-        assert_eq!(get_flags(0b0000000000010110), "ACK RST SYN ");
-        assert_eq!(get_flags(0b0000000000010111), "ACK RST SYN FIN ");
+        assert_eq!(get_flags(0b0000000000010001), "FIN ACK ");
+        assert_eq!(get_flags(0b0000000000010010), "SYN ACK ");
+        assert_eq!(get_flags(0b0000000000010011), "FIN SYN ACK ");
+        assert_eq!(get_flags(0b0000000000010100), "RST ACK ");
+        assert_eq!(get_flags(0b0000000000010101), "FIN RST ACK ");
+        assert_eq!(get_flags(0b0000000000010110), "SYN RST ACK ");
+        assert_eq!(get_flags(0b0000000000010111), "FIN SYN RST ACK ");
     }
-
-    #[test]
-    fn test_matches_filter() {}
 }

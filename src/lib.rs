@@ -28,6 +28,8 @@ pub struct SniffOpts {
     /// Will try to resolve IP addresses to hostnames
     #[structopt(short, long)]
     pub resolve: bool,
+    #[structopt(long)]
+    promiscuous: bool,
 }
 
 #[derive(Debug, StructOpt, Clone)]
