@@ -201,7 +201,7 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
         }
         Err(e) => {
             if e.kind() != std::io::ErrorKind::Interrupted {
-                error!("error reading: {}", e);
+                error!("error reading: {e}");
             }
             return None;
         }

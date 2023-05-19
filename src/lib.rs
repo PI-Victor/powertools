@@ -55,7 +55,7 @@ impl FromStr for TLProtocol {
     type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
+        match s.to_uppercase().as_str() {
             "TCP" => Ok(TLProtocol::TCP),
             "UDP" => Ok(TLProtocol::UDP),
             "ALL" => Ok(TLProtocol::ALL),
