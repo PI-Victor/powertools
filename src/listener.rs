@@ -124,18 +124,7 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 
                         debug!("ethernet frame wrapped ipv4 packet: {:?}", ipv4_packet);
 
-                        return Some(PacketInfo {
-                            source: ipv4_packet.get_source().to_string(),
-                            destination: ipv4_packet.get_destination().to_string(),
-                            source_port: tcp_packet.get_source(),
-                            destination_port: tcp_packet.get_destination(),
-                            protocol: ipv4_packet.get_next_level_protocol(),
-                            flags: get_flags(tcp_packet.get_flags()),
-                            ipv6: false,
-                            length: tcp_packet.packet().len(),
-                            sequence: u32::from_be(tcp_packet.get_sequence()),
-                            window: u16::from_be(tcp_packet.get_window()),
-                        });
+                        return Some(new_packet_v4_info(&tcp_packet, &ipv4_packet));
                     }
                     EtherTypes::Ipv6 => {
                         let ipv6_packet = Ipv6Packet::new(eth.payload())?;
@@ -143,18 +132,7 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 
                         debug!("ethernet frame wrapped ipv6 packet: {:?}", ipv6_packet);
 
-                        return Some(PacketInfo {
-                            source: ipv6_packet.get_source().to_string(),
-                            destination: ipv6_packet.get_destination().to_string(),
-                            source_port: tcp_packet.get_source(),
-                            destination_port: tcp_packet.get_destination(),
-                            protocol: ipv6_packet.get_next_header(),
-                            flags: get_flags(tcp_packet.get_flags()),
-                            ipv6: true,
-                            length: tcp_packet.packet().len(),
-                            sequence: u32::from_be(tcp_packet.get_sequence()),
-                            window: u16::from_be(tcp_packet.get_window()),
-                        });
+                        return Some(new_packet_v6_info(&tcp_packet, &ipv6_packet));
                     }
                     // TODO: maybe handle other protocols?
                     _ => return None,
@@ -168,35 +146,13 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
 
                 debug!("found unwrapped ipv4 tcp packet: {:?}", ipv4_packet);
 
-                return Some(PacketInfo {
-                    source: ipv4_packet.get_source().to_string(),
-                    destination: ipv4_packet.get_destination().to_string(),
-                    source_port: tcp_packet.get_source(),
-                    destination_port: tcp_packet.get_destination(),
-                    protocol: ipv4_packet.get_next_level_protocol(),
-                    flags: get_flags(tcp_packet.get_flags()),
-                    ipv6: false,
-                    length: tcp_packet.packet().len(),
-                    sequence: u32::from_be(tcp_packet.get_sequence()),
-                    window: u16::from_be(tcp_packet.get_window()),
-                });
+                return Some(new_packet_v4_info(&tcp_packet, &ipv4_packet));
             } else {
                 let ipv6_packet = Ipv6Packet::new(packet)?;
                 let tcp_packet = TcpPacket::new(ipv6_packet.payload())?;
 
                 debug!("found unwrapped ipv6 tcp packet: {:?}", ipv6_packet);
-                return Some(PacketInfo {
-                    source: ipv6_packet.get_source().to_string(),
-                    destination: ipv6_packet.get_destination().to_string(),
-                    source_port: tcp_packet.get_source(),
-                    destination_port: tcp_packet.get_destination(),
-                    protocol: ipv6_packet.get_next_header(),
-                    flags: get_flags(tcp_packet.get_flags()),
-                    ipv6: true,
-                    length: tcp_packet.packet().len(),
-                    sequence: u32::from_be(tcp_packet.get_sequence()),
-                    window: u16::from_be(tcp_packet.get_window()),
-                });
+                return Some(new_packet_v6_info(&tcp_packet, &ipv6_packet));
             };
         }
         Err(e) => {
@@ -208,39 +164,64 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
     }
 }
 
+
+fn new_packet_v4_info(tcp_packet: &TcpPacket, ipv4_packet: &Ipv4Packet) -> PacketInfo {
+    PacketInfo {
+        source: ipv4_packet.get_source().to_string(),
+        destination: ipv4_packet.get_destination().to_string(),
+        source_port: tcp_packet.get_source(),
+        destination_port: tcp_packet.get_destination(),
+        protocol: ipv4_packet.get_next_level_protocol(),
+        flags: get_flags(tcp_packet.get_flags()),
+        ipv6: false,
+        length: tcp_packet.packet().len(),
+        sequence: u32::from_be(tcp_packet.get_sequence()),
+        window: u16::from_be(tcp_packet.get_window()),
+    }
+}
+
+fn new_packet_v6_info(tcp_packet: &TcpPacket, ipv6_packet: &Ipv6Packet) -> PacketInfo {
+    PacketInfo {
+        source: ipv6_packet.get_source().to_string(),
+        destination: ipv6_packet.get_destination().to_string(),
+        source_port: tcp_packet.get_source(),
+        destination_port: tcp_packet.get_destination(),
+        protocol: ipv6_packet.get_next_header(),
+        flags: get_flags(tcp_packet.get_flags()),
+        ipv6: true,
+        length: tcp_packet.packet().len(),
+        sequence: u32::from_be(tcp_packet.get_sequence()),
+        window: u16::from_be(tcp_packet.get_window()),
+    }
+}
+
 fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
-    if opts.source.is_some() && opts.source.as_ref().unwrap() != &packet_info.source {
-        return false;
+    if let Some(source) = &opts.source {
+        if source != &packet_info.source {
+            return false;
+        }
     }
-    if opts.destination.is_some() && opts.destination.as_ref().unwrap() != &packet_info.destination
-    {
-        return false;
+    if let Some(destination) = &opts.destination {
+        if destination != &packet_info.destination {
+            return false;
+        }
     }
-    if opts.source_port.is_some() && opts.source_port.unwrap() != packet_info.source_port {
-        return false;
+    if let Some(source_port) = opts.source_port {
+        if source_port != packet_info.source_port {
+            return false;
+        }
     }
-    if opts.destination_port.is_some()
-        && opts.destination_port.unwrap() != packet_info.destination_port
-    {
-        return false;
+    if let Some(destination_port) = opts.destination_port {
+        if destination_port != packet_info.destination_port {
+            return false;
+        }
     }
 
     match opts.protocol {
-        TLProtocol::ALL => {
-            return true;
-        }
-        TLProtocol::TCP => {
-            if packet_info.protocol != IpNextHeaderProtocols::Tcp {
-                return false;
-            }
-        }
-        TLProtocol::UDP => {
-            if packet_info.protocol != IpNextHeaderProtocols::Udp {
-                return false;
-            }
-        }
+        TLProtocol::ALL => true,
+        TLProtocol::TCP => packet_info.protocol == IpNextHeaderProtocols::Tcp,
+        TLProtocol::UDP => packet_info.protocol == IpNextHeaderProtocols::Udp,
     }
-    true
 }
 
 fn resolve_dns(ip: &str) -> String {
@@ -291,7 +272,7 @@ fn get_interface(interface: &str) -> Result<NetworkInterface> {
 
 pub fn list_interfaces() {
     datalink::interfaces().into_iter().for_each(|i| {
-        println!("{}", i);
+        println!("{i}");
     });
 }
 

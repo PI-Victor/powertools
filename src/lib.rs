@@ -59,7 +59,7 @@ impl FromStr for TLProtocol {
             "TCP" => Ok(TLProtocol::TCP),
             "UDP" => Ok(TLProtocol::UDP),
             "ALL" => Ok(TLProtocol::ALL),
-            _ => Err(format!("Invalid protocol: {}", s)),
+            _ => Err(format!("Invalid protocol: {s}")),
         }
     }
 }
