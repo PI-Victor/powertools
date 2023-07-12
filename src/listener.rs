@@ -1,3 +1,4 @@
+use crate::{PcapFile, PcapHeader};
 use crate::{Result, SniffOpts, TLProtocol};
 use pnet::datalink::{self, DataLinkReceiver, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
@@ -13,8 +14,46 @@ use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, error};
 
+// TCP Packet Header
+//  0                   1                   2                   3
+//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |          Source Port          |       Destination Port        |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |                        Sequence Number                        |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |                     Acknowledgment Number                     |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |  Data |       |U|A|P|R|S|F|                               |   |
+// | Offset| RSVD  |R|C|S|S|Y|I|            Window                 |
+// |       |       |G|K|H|T|N|N|                               |   |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |           Checksum            |         Urgent Pointer        |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |                    Options (if Data Offset > 5)              |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// |                    Data (if present)                          |
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
 pub async fn run(opts: SniffOpts) -> Result<()> {
     let interface = get_interface(&opts.interface)?;
+    let mut file_buffer = None;
+
+    if opts.output.as_ref().is_some() {
+        let mut pcap_file = PcapFile::new(opts.output.as_ref().unwrap()).await?;
+
+        pcap_file.header = PcapHeader {
+            magic_number: 0xa1b2c3d4,
+            major_version: 2,
+            minor_version: 4,
+            reserved1: 0,
+            reserved2: 0,
+            snaplen: 65535,
+            linktype: 1,
+        };
+
+        file_buffer = Some(pcap_file)
+    }
 
     println!("Listening on interface: {}\n", interface.name);
     println!("NO | Source | Destination | Protocol | Flags | Length | Sequence | Window\n");
@@ -44,7 +83,7 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(0)) => {
-                if let Some(mut packet_info) = handle_receiver(rx_clone){
+                if let Some(mut packet_info) = handle_receiver(rx_clone, None){
                     // TODO: Find a better solution, if the packet is filtered
                     // out, it should not be resolved, this adds dns overhead
                     if opts.resolve {
@@ -52,7 +91,7 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
                        packet_info.destination = resolve_dns(&packet_info.destination);
                     }
 
-                   if matches_filter(packet_info.clone(), &opts) {
+                   if matches_filter(&packet_info, &opts) {
                        println!("{}: {}", no, &packet_info);
                    }
                    no += 1;
@@ -111,7 +150,10 @@ impl Display for PacketInfo {
     }
 }
 
-fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketInfo> {
+fn handle_receiver(
+    rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>,
+    file_buffer: Option<PcapFile>,
+) -> Option<PacketInfo> {
     let mut rx = rx.lock().unwrap();
 
     match rx.next() {
@@ -120,7 +162,10 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                 match eth.get_ethertype() {
                     EtherTypes::Ipv4 => {
                         let ipv4_packet = Ipv4Packet::new(eth.payload())?;
+
                         let tcp_packet = TcpPacket::new(ipv4_packet.payload())?;
+                        let p = tcp_packet.packet();
+                        println!("tcp packet: {:?}", &p[..]);
 
                         debug!("ethernet frame wrapped ipv4 packet: {:?}", ipv4_packet);
 
@@ -195,7 +240,7 @@ fn new_packet_v6_info(tcp_packet: &TcpPacket, ipv6_packet: &Ipv6Packet) -> Packe
     }
 }
 
-fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
+fn matches_filter(packet_info: &PacketInfo, opts: &SniffOpts) -> bool {
     if let Some(source) = &opts.source {
         if source != &packet_info.source {
             return false;
@@ -306,5 +351,205 @@ mod tests {
         assert_eq!(get_flags(0b0000000000010101), "FIN RST ACK ");
         assert_eq!(get_flags(0b0000000000010110), "SYN RST ACK ");
         assert_eq!(get_flags(0b0000000000010111), "FIN SYN RST ACK ");
+    }
+
+    #[test]
+    fn test_matches_filter() {
+        // test source filter
+        {
+            let packet_info = PacketInfo {
+                source: String::from("test"),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: Some(String::from("test")),
+                destination: None,
+                source_port: None,
+                destination_port: None,
+                protocol: TLProtocol::ALL,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // test destination filter
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from("test"),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: Some(String::from("test")),
+                source_port: None,
+                destination_port: None,
+                protocol: TLProtocol::ALL,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // test source port filter
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 123,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: None,
+                source_port: Some(123),
+                destination_port: None,
+                protocol: TLProtocol::ALL,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // test destination port filter
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 123,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: None,
+                source_port: None,
+                destination_port: Some(123),
+                protocol: TLProtocol::ALL,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // Filter by TCP protocol
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: None,
+                source_port: None,
+                destination_port: None,
+                protocol: TLProtocol::TCP,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // Filter by UDP protocol
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Udp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: None,
+                source_port: None,
+                destination_port: None,
+                protocol: TLProtocol::UDP,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
+        // Filter by ALL protocol
+        {
+            let packet_info = PacketInfo {
+                source: String::from(""),
+                destination: String::from(""),
+                flags: String::from(""),
+                ipv6: false,
+                length: 0,
+                window: 0,
+                source_port: 0,
+                sequence: 0,
+                destination_port: 0,
+                protocol: IpNextHeaderProtocols::Tcp,
+            };
+            let sniff_opts = SniffOpts {
+                source: None,
+                destination: None,
+                source_port: None,
+                destination_port: None,
+                protocol: TLProtocol::ALL,
+                interface: String::from(""),
+                resolve: false,
+                promiscuous: false,
+                output: None,
+            };
+
+            assert!(matches_filter(&packet_info, &sniff_opts));
+        }
     }
 }

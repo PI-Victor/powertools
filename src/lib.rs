@@ -1,5 +1,8 @@
 pub mod listener;
+pub mod pcap;
 
+use pcap::{PcapFile, PcapHeader, PcapPacket};
+use std::path::PathBuf;
 use std::str::FromStr;
 use structopt::StructOpt;
 
@@ -13,23 +16,33 @@ pub enum SubCommands {
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct SniffOpts {
+    /// Interface to listen on
     #[structopt(short = "if", long)]
     pub interface: String,
+    /// Filter by protocol
     #[structopt(short, long, possible_values = TLProtocol::variants(), case_insensitive = true, default_value = "ALL")]
     pub protocol: TLProtocol,
+    /// Filter by source IP address
     #[structopt(long)]
     pub source: Option<String>,
+    /// Filter by source port
     #[structopt(long)]
     pub source_port: Option<u16>,
+    /// Filter by destination IP address
     #[structopt(long)]
     pub destination: Option<String>,
+    /// Filter by destination port
     #[structopt(short, long)]
     pub destination_port: Option<u16>,
     /// Will try to resolve IP addresses to hostnames
     #[structopt(short, long)]
     pub resolve: bool,
+    /// Turns promiscuous mode on
     #[structopt(long)]
     promiscuous: bool,
+    /// Save captured packets to a pcap file
+    #[structopt(short, long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
