@@ -43,11 +43,12 @@ pub enum TLProtocol {
     ALL,
     TCP,
     UDP,
+    ICMP,
 }
 
 impl TLProtocol {
     pub fn variants() -> &'static [&'static str] {
-        &["TCP", "UDP", "ALL"]
+        &["TCP", "UDP", "ICMP", "ALL"]
     }
 }
 
@@ -58,6 +59,7 @@ impl FromStr for TLProtocol {
         match s.to_uppercase().as_str() {
             "TCP" => Ok(TLProtocol::TCP),
             "UDP" => Ok(TLProtocol::UDP),
+            "ICMP" => Ok(TLProtocol::ICMP),
             "ALL" => Ok(TLProtocol::ALL),
             _ => Err(format!("Invalid protocol: {s}")),
         }

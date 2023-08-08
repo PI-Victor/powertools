@@ -53,7 +53,7 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
                     }
 
                    if matches_filter(packet_info.clone(), &opts) {
-                       println!("{}: {}", no, &packet_info);
+                       println!("{no}: {}", &packet_info);
                    }
                    no += 1;
                 }
@@ -164,7 +164,6 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
     }
 }
 
-
 fn new_packet_v4_info(tcp_packet: &TcpPacket, ipv4_packet: &Ipv4Packet) -> PacketInfo {
     PacketInfo {
         source: ipv4_packet.get_source().to_string(),
@@ -221,6 +220,7 @@ fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
         TLProtocol::ALL => true,
         TLProtocol::TCP => packet_info.protocol == IpNextHeaderProtocols::Tcp,
         TLProtocol::UDP => packet_info.protocol == IpNextHeaderProtocols::Udp,
+        TLProtocol::ICMP => packet_info.protocol == IpNextHeaderProtocols::Icmp,
     }
 }
 
