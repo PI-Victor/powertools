@@ -30,6 +30,9 @@ pub struct SniffOpts {
     pub resolve: bool,
     #[structopt(long)]
     promiscuous: bool,
+    /// Comma separated list of ports to filter from the traffic output
+    #[structopt(short, long)]
+    port_filter: Vec<u16>,
 }
 
 #[derive(Debug, StructOpt, Clone)]

@@ -206,12 +206,14 @@ fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
         }
     }
     if let Some(source_port) = opts.source_port {
-        if source_port != packet_info.source_port {
+        if source_port != packet_info.source_port || opts.port_filter.contains(&source_port) {
             return false;
         }
     }
     if let Some(destination_port) = opts.destination_port {
-        if destination_port != packet_info.destination_port {
+        if destination_port != packet_info.destination_port
+            || opts.port_filter.contains(&destination_port)
+        {
             return false;
         }
     }
