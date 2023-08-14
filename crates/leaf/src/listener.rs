@@ -1,5 +1,6 @@
 use crate::{Result, SniffOpts, TLProtocol};
 use pnet::datalink::{self, DataLinkReceiver, NetworkInterface};
+use pnet::packet::arp::ArpPacket;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::Ipv4Packet;
@@ -7,6 +8,7 @@ use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpFlags;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::Packet;
+use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -64,12 +66,12 @@ pub async fn run(opts: SniffOpts) -> Result<()> {
 }
 
 #[derive(Clone, Debug)]
-struct PacketInfo {
+struct PacketInfo<T> {
     source: String,
     source_port: u16,
     destination: String,
     destination_port: u16,
-    protocol: IpNextHeaderProtocol,
+    protocol: T,
     flags: String,
     ipv6: bool,
     length: usize,
@@ -77,7 +79,7 @@ struct PacketInfo {
     window: u16,
 }
 
-impl Display for PacketInfo {
+impl<T: fmt::Display> Display for PacketInfo<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.ipv6 {
             write!(
@@ -111,7 +113,7 @@ impl Display for PacketInfo {
     }
 }
 
-fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketInfo> {
+fn handle_receiver<T>(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketInfo<T>> {
     let mut rx = rx.lock().unwrap();
 
     match rx.next() {
@@ -135,7 +137,10 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
                         return Some(new_packet_v6_info(&tcp_packet, &ipv6_packet));
                     }
                     // TODO: maybe handle other protocols?
-                    _ => return None,
+                    EtherTypes::Aarp => {
+                        let arp_packet = ArpPacket::new(eth.payload())?;
+                    }
+                    _ => (),
                 }
             } else {
                 error!("failed to parse ethernet packet, skipping...");
@@ -164,7 +169,7 @@ fn handle_receiver(rx: Arc<Mutex<Box<dyn DataLinkReceiver>>>) -> Option<PacketIn
     }
 }
 
-fn new_packet_v4_info(tcp_packet: &TcpPacket, ipv4_packet: &Ipv4Packet) -> PacketInfo {
+fn new_packet_v4_info<T>(tcp_packet: &TcpPacket, ipv4_packet: &Ipv4Packet) -> PacketInfo<T> {
     PacketInfo {
         source: ipv4_packet.get_source().to_string(),
         destination: ipv4_packet.get_destination().to_string(),
@@ -179,7 +184,7 @@ fn new_packet_v4_info(tcp_packet: &TcpPacket, ipv4_packet: &Ipv4Packet) -> Packe
     }
 }
 
-fn new_packet_v6_info(tcp_packet: &TcpPacket, ipv6_packet: &Ipv6Packet) -> PacketInfo {
+fn new_packet_v6_info<T>(tcp_packet: &TcpPacket, ipv6_packet: &Ipv6Packet) -> PacketInfo<T> {
     PacketInfo {
         source: ipv6_packet.get_source().to_string(),
         destination: ipv6_packet.get_destination().to_string(),
@@ -194,7 +199,27 @@ fn new_packet_v6_info(tcp_packet: &TcpPacket, ipv6_packet: &Ipv6Packet) -> Packe
     }
 }
 
-fn matches_filter(packet_info: PacketInfo, opts: &SniffOpts) -> bool {
+fn new_arp_packet<T>(arp_packet: &ArpPacket, ethernet_packet: &EthernetPacket) -> PacketInfo<T> {
+    PacketInfo {
+        source: ethernet_packet.get_source().to_string(),
+        destination: ethernet_packet.get_destination().to_string(),
+        source_port: 0,
+        destination_port: 0,
+        protocol: arp_packet.get_protocol_type(),
+        flags: String::new(),
+        ipv6: false,
+        length: arp_packet.packet().len(),
+        sequence: 0,
+        window: 0,
+    }
+}
+
+fn matches_filter<T>(packet_info: PacketInfo<T>, opts: &SniffOpts) -> bool {
+    if opts.port_filter.contains(&packet_info.source_port)
+        || opts.port_filter.contains(&packet_info.destination_port)
+    {
+        return false;
+    }
     if let Some(source) = &opts.source {
         if source != &packet_info.source {
             return false;

@@ -1,0 +1,12 @@
+[Unit]
+Description=PowerUtil
+After=multi-user.target
+
+[Service]
+ExecStart=/home/vicp/.cargo/bin/powerutil check --config-file /home/vicp/.powerutil.yaml
+User=root
+Restart=always
+RestartSec=300
+
+[Install]
+WantedBy=multi-user.target

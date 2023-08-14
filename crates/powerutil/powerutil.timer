@@ -1,0 +1,9 @@
+[Unit]
+Description=Run PowerUtil every few seconds
+
+[Timer]
+OnUnitActiveSec=5s
+Unit=powerutil.service
+
+[Install]
+WantedBy=timers.target
