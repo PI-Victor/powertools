@@ -1,13 +1,18 @@
+#[allow(unstable_features)]
 use serde::{Deserialize, Serialize};
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use structopt::StructOpt;
+use utmp_rs::{Utmp32Parser, UtmpEntry};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Config {
-    idle_threshold: u32,
+    idle_threshold: i64,
     disable: bool,
+    utmp_path: String,
 }
 
 #[derive(StructOpt)]
@@ -31,7 +36,9 @@ struct Set {
     #[structopt(short, long)]
     disable: Option<bool>,
     #[structopt(short, long, default_value = "15")]
-    idle_threshold: u32,
+    idle_threshold: i64,
+    #[structopt(short, long, parse(from_os_str), default_value = "/var/run/utmp")]
+    utmp_path: std::path::PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -44,63 +51,49 @@ fn main() -> Result<()> {
 }
 
 fn check_idle(opts: Check) -> Result<()> {
-    let path = if let Some(path) = opts.config_file {
-        path.to_string_lossy().to_string()
-    } else {
-        let home_dir = std::env::var("HOME").unwrap_or(String::from(""));
-        format!("{home_dir}/.powerutil.yaml")
-    };
-
-    let file = std::fs::read(path).map_err(|e| format!("failed to parse config file: {e}"))?;
-    let config: Config = serde_yaml::from_slice(file.as_slice())
-        .map_err(|e| format!("failed to parse config: {e}"))?;
+    let config = get_config(opts.config_file)?;
 
     if opts.view {
         println!("Current config: {:#?}", &config);
     }
 
     if config.disable {
-        println!("Disabling powerutil...");
+        println!("Powerutil disable from config, exiting...");
         std::process::exit(0);
     }
-
-    let output = Command::new("w")
-        .output()
-        .expect("Failed to execute command");
-
-    let output = String::from_utf8_lossy(&output.stdout);
-
     let mut idle_times = Vec::new();
 
-    for line in output.lines().skip(2) {
-        println!("Logged in user: {line}");
+    for entry in Utmp32Parser::from_path(config.utmp_path)? {
+        let entry = entry?;
+        match entry {
+            UtmpEntry::UserProcess { line, .. } => {
+                let tty_path = Path::new("/dev").join(line);
 
-        if let Some(idle_str) = line.split_whitespace().nth(3) {
-            if idle_str.contains("s") {
-                println!("Found active user with low idle: {idle_str}, exiting...");
-                std::process::exit(0);
+                match get_idle_time(tty_path) {
+                    Ok(idle_secs) => {
+                        let idle_mins = idle_secs / 60;
+                        if idle_mins == 0 || idle_mins < config.idle_threshold {
+                            println!("Users active within threshold: {idle_mins}m, exiting...");
+                            std::process::exit(0);
+                        }
+                        idle_times.push(idle_mins);
+                    }
+                    Err(e) => {
+                        println!("Failed to get idle time: {e}");
+                        continue;
+                    }
+                }
             }
-
-            let idle_mins = idle_str
-                .split(":")
-                .nth(0)
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-
-            idle_times.push(idle_mins);
+            _ => continue,
         }
     }
-
-    // if idle_times.len() == 0 {
-    //     println!("No users found, shutting down...");
-    //     shutdown_system();
-    // }
-
-    let biggest_idle = idle_times.iter().min().unwrap_or(&0);
-    if biggest_idle > &config.idle_threshold {
-        println!("User idle threshold reached, suspending...");
-
+    let smallest_idle = idle_times.iter().min().unwrap_or(&0);
+    println!(
+        "Smallest idle time: {smallest_idle}m (threshold: {}m)",
+        config.idle_threshold
+    );
+    if *smallest_idle >= config.idle_threshold {
+        println!("User idle threshold reached: {smallest_idle}m, suspending...");
         suspend_system();
     }
     Ok(())
@@ -117,6 +110,7 @@ fn set_config(opts: Set) -> Result<()> {
     let config = Config {
         idle_threshold: opts.idle_threshold,
         disable: opts.disable.unwrap_or(false),
+        utmp_path: opts.utmp_path.to_string_lossy().to_string(),
     };
 
     let contents =
@@ -127,6 +121,21 @@ fn set_config(opts: Set) -> Result<()> {
     Ok(())
 }
 
+fn get_config(config_file: Option<impl AsRef<Path>>) -> Result<Config> {
+    let path = if let Some(path) = config_file {
+        path.as_ref().to_path_buf()
+    } else {
+        let home_dir = std::env::var("HOME").unwrap_or(String::from("."));
+        PathBuf::from(home_dir).join(".powerutil.yaml")
+    };
+
+    let file = std::fs::read(path).map_err(|e| format!("failed to parse config file: {e}"))?;
+    let config: Config = serde_yaml::from_slice(file.as_slice())
+        .map_err(|e| format!("failed to parse config: {e}"))?;
+
+    Ok(config)
+}
+
 fn suspend_system() {
     Command::new("systemctl")
         .arg("suspend")
@@ -134,9 +143,19 @@ fn suspend_system() {
         .expect("Failed to execute command");
 }
 
-// fn shutdown_system() {
-//     Command::new("systemctl")
-//         .arg("poweroff")
-//         .output()
-//         .expect("Failed to execute command");
-// }
+fn get_idle_time(tty_path: PathBuf) -> Result<libc::time_t> {
+    let tty_str = tty_path
+        .into_os_string()
+        .into_string()
+        .map_err(|os_str| format!("failed to convert tty path to string: {:#?}", os_str))?;
+    let cstr = CString::new(tty_str).map_err(|e| format!("failed to convert tty path: {e}"))?;
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::stat(cstr.as_ptr(), &mut stat) };
+
+    if result == 0 {
+        Ok(unsafe { libc::time(std::ptr::null_mut()) - stat.st_atime })
+    } else {
+        Err(format!("Failed to stat tty: {result}").into())
+    }
+}

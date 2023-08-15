@@ -2,10 +2,12 @@
 name = "powerutil"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Victor Palade <victor@cloudflavor.io>"]
 
 [dependencies]
+dbus = "0.9"
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9.25"
+serde_yaml = "0.9"
 structopt = "0.3"
+utmp-rs = "0.3"

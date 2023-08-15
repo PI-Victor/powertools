@@ -1,8 +1,8 @@
 [Unit]
-Description=Run PowerUtil every few seconds
+Description=Run PowerUtil every few mins
 
 [Timer]
-OnUnitActiveSec=5s
+OnUnitActiveSec=300s
 Unit=powerutil.service
 
 [Install]
